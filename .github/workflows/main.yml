@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v1
+    - name: Use Node.js 12.x
+      uses: actions/setup-node@v1
+      with:
+        node-version: "12.x"
+    - name: init)init ssh
+      run: |
+          mkdir -p ~/.ssh/
+          echo "${{secrets.blog_pri}}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan github.com >> ~/.ssh/known_hosts
+          git config --global user.name "arronhong"
+          git config --global user.email "arronhong216@gmail.com"
+    - name: npm install
+      run: |
+        npm install
+    - name: npm install -g hexo-cli
+      run: |
+        npm install -g hexo-cli
+    - name: hexo d -g
+      run: |
+        hexo d -g
