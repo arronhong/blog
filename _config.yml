@@ -105,3 +105,9 @@ deploy:
   type: git
   repo: git@github.com:arronhong/arronhong.github.io.git
   branch: master
+
+excerpt:
+  depth: 2
+  excerpt_excludes: []
+  more_excludes: []
+  hideWholePostExcerpts: true
