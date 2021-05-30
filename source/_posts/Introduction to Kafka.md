@@ -47,12 +47,7 @@ kafka透過zookeeper管理cluster內的配置，像是cluster內brokers、consum
 
 ## Producer
 ### How producer send message
-:::info
-以下是apache kafka built-in client api的介紹
-:::
-
 #### Send api
-
 1. 呼叫producer send api，並帶入topic、value以及optional key參數
 2. 把value跟key serialize成bytes
 3. 根據key決定partition或自定義partitioning的方法
@@ -64,7 +59,6 @@ kafka透過zookeeper管理cluster內的配置，像是cluster內brokers、consum
 
 
 #### Sender thread
-
 1. sender thread poll batch queues，每個batch queue拿一個batch(batch由多筆messages組成)
 2. 根據batch要送到哪個broker分組
 3. 將batch送到broker
@@ -74,7 +68,6 @@ kafka透過zookeeper管理cluster內的配置，像是cluster內brokers、consum
 ![](https://i.imgur.com/tlEygcu.png)
 
 #### When batch is ready
-
 * batch size到達設定大小
 * 超過收集的時間(linger time)
 * 另一個要送到相同broker的batch已經ready
@@ -144,28 +137,43 @@ send api是async讓sender thread把message送到broker，根據use case，應用
 當某個key的message數量遠大於其他key，可能會導致特定broker的空間與loading過重，這時可以自訂partitioning的策略(有些driver不支援自訂partitioning)，像是把數量很大的kay寫到有較大儲存空間的partition，其他key平均在其他partitions
 
 ## Consumer
-:::info
-以下是apache kafka built-in client api的介紹
-:::
-
-### Consumer group and rebalance
-#### Consumer group
-一組consumers共同合作處理一些topics。透過增減member的數量來拓展處理messages的能力，因此topic擁有數量較多的partitions，在scale上較有彈性
+### Consumer group
+一組consumers共同合作處理一些topics，也就是一組consumers分擔多個partitions的loading。透過增減member的數量來拓展處理messages的能力，因此topic擁有數量較多的partitions，在scale上較有彈性
 
 一個partition只會被同一group內的一個member consume，因此member的數量超過partition的數量時，就會有consumer會閒置
 
 ![](https://i.imgur.com/AMPMDQV.png)
 
-#### Rebalance
-下列情況發生時，consumer group內的partitions需要重新分配，好讓每個partition都有被處理以及盡可能地平均分配
+### Consumer Protocol
+#### Startup
+consumer起來時先問broker使用的api version，接著透過metadata request詢問cluster information(e.q. broker address、partition數量以及partition leader等)。在broker端會有一個group coordinator(一個broker，不同的group會有不同的broker)，coordinator負責處理consumer heartbeat、指派group leader以及consumer加入離開等事務。consumer接著會尋找coordinator並送JoinGroup reuqest給coordinator要求加入group，第一個加入group的consumer成為group leader，group leader會從coordinator得知group中所有members的資訊(資訊存在zookeeper)，group leader負責分配partitions並將名單送給coordinator，接著members詢問coordinator得知自己的assignment
+
+![](https://i.imgur.com/eFQn39y.png)
+
+#### Consumption
+consumer開始拉取message時要先知道要從哪裡開始，可以透過fetch offset request得知該partition上次處理到哪個offset，fetch offset request不是必要的，只要consumer已經知道offset，那只要在fetch request時可以聲明即可，隨著fetch request不停地拉取messages，consumer還必須適時的向broker更新offset以及向coordinator發送heartbeat
+
+![](https://i.imgur.com/kH20fYm.png)
+
+
+#### Shutdown
+consumer發送leave group request以gracefully shutdown
+
+![](https://i.imgur.com/pFagoix.png)
+
+### Poll loop
+consumer poll api封裝大部分的動作，包含partition rebalance、送heatbeat及data fetching，這樣的設計讓application只要處理資料就好。consumer必須要在一定的時間內送出heartbeat，否則會被認為not alive，因此處理資料的時間必需短於session timeout的時間
+
+poll api回傳messages，每筆message包含key、value、partition、offset和topic。poll可以設定參數，控制block多久時間來等待consumer buffer裡有資料，時間長短端看application想要多快拿回控制
+
+### Rebalance
+某些情況發生時，consumer group內的partitions需要重新分配，好讓每個partition都有被處理以及盡可能地平均分配
 * consumer加入group
 * consumer離開group
 * topic有新增partition
+* broker failure，該broker leader partition轉讓
 
-consumer會定時送heartbeat給group coordinator(其中一個broker，不同的group會有不同的broker)，當group coordinator一段時間沒收到heartbeat時便認定consumer已經退出group，因此觸發rebalance。在執行realance的期間，整個group不會consume message。在group coordinator尚未發現consumer已經退出(e.q. consumer crash)的這段時間，會使partition的messages暫停被consume，直到heartbeat session timeout。consumer明確地告知group coordinator退出，可使group coordinator立即觸發rebalance以便降低無法處理partition的gap
-
-#### Assigning partitions
-consumer加入group時會送JoinGroup request給group coordinator，第一個加入group的consumer成為group leader，group leader會從group coordinator得到group中所有consumers的資訊(資訊存在zookeeper)，group leader會負責分配partitions並將名單送給group coordinator，group coordinator再通知其他consumers
+consumer會定時送heartbeat給coordinator，當coordinator一段時間沒收到heartbeat時便認定consumer已經退出group，因此觸發rebalance。在執行rebalance的期間，整個group不會consume message。在coordinator尚未發現consumer已經退出(e.q. consumer crash)的這段時間，會使partition的messages暫停被consume，直到heartbeat session timeout。consumer明確地告知group coordinator退出，可使group coordinator立即觸發rebalance以便降低無法處理partition的gap
 
 #### Rebalance listeners
 在rebalance的前後，可以註冊callback來做一些處理，像是在rebalance前，commit你已經處理好的message等
@@ -175,12 +183,6 @@ rebalance開始前，consumers都停止comsume後。這裡可以讓application c
 
 * onPartitionsAssigned
 partition重新分配後，consumer開始consume前
-
-
-### Poll loop
-consumer poll api封裝大部分的動作，包含partition rebalance、送heatbeat及data fetching，這樣的設計讓application只要處理資料就好。consumer第一次呼叫poll時，會先找到group coordinator並加入group，在收到指派的partition後開始data fetch等動作。consumer必須要在一定的時間內送出heartbeat，否則會被認為not alive，因此處理資料的時間必需短於session timeout的時間
-
-poll api回傳messages，每筆message包含key、value、partition、offset和topic。poll可以設定參數，控制block多久時間來等待consumer buffer裡有資料，時間長短端看application想要多快拿回控制
 
 ### Consumer configuration
 #### fetch.min.bytes
@@ -371,8 +373,27 @@ commit的頻率必須在效能與message重複的數量之間做取捨，commit�
 
 為了監測message從produce到consume是否符合需求上的即時，會需要紀錄produce messages數量、consume messages數量以及message從produce到被consume花了多少時間(version 0.10.0 message format就有timestamp，沒有的話建議produce時加上，並且建議加上一些metadata像是哪裡produce等方邊追蹤除錯)
 
+### Choosing the number of partitions for a topic
+
+partition是kafka平行處理訊息的單位，partition數量影響系統throughdput，我們透過可以期望的throughput來粗淺地計算partition需要的數量
+
+1. topic期望的throughput (TT)
+2. 一個producer可以承受的throughput (TP)
+3. 一個consumer可以承受的throughput (TC)
+4. 需要多少producer (NP = TT/TP) 
+5. 需要多少consumer (NC = TT/TC)
+6. partitions = max(NP, NC)
+
+假設期望topic可以有1GB/sec的read，而一個consumer的能力是50MB/sec，因此最少需要20個consumers，就會是20個partitions；而假設希望topic可以有1GB/sec的write，而一個producer的能力是100MB/sec，因此最少需要10個producers及10個partitions。因此當有20個partitions時就能符合期望的throughput。
+
+partition的數量雖然可以後來再增加，但partition數量改變後，相同的key就可能不會再被寫入原先的partition，因此這個key的order就無法保證。一個常見的實現是，一開始根據未來期望的throughput來建立partitions，以現在的throughput來建立broker，等到throughput上升擴展broker後，將部分partitions轉移到新的broker。
+
+較多的partition，也表示kafka會開啟較多的file descriptor，確保作業系統fd limit的設定。
+
 ## Reference
 
-[Kafka the definitive guide](https://www.confluent.io/resources/kafka-the-definitive-guide/)
-[Tuning Kafka for low latency guaranteed messaging -- Jiangjie (Becket) Qin (LinkedIn), 6/15/16](https://www.youtube.com/watch?v=oQe7PpDDdzA)
-[How Kafka’s Storage Internals Work](https://thehoard.blog/how-kafkas-storage-internals-work-3a29b02e026)
+* [Kafka the definitive guide](https://www.confluent.io/resources/kafka-the-definitive-guide/)
+* [Tuning Kafka for low latency guaranteed messaging -- Jiangjie (Becket) Qin (LinkedIn), 6/15/16](https://www.youtube.com/watch?v=oQe7PpDDdzA)
+* [How Kafka’s Storage Internals Work](https://thehoard.blog/how-kafkas-storage-internals-work-3a29b02e026)
+* [Cloudera - Apache Kafka Guide](https://docs.cloudera.com/documentation/enterprise/latest/topics/kafka.html)
+* [How to choose the number of topics/partitions in a Kafka cluster?](https://www.confluent.io/blog/how-choose-number-topics-partitions-kafka-cluster/)
